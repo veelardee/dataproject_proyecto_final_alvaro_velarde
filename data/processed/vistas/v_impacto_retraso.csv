@@ -1,0 +1,8 @@
+tramo_retraso,pedidos,nota_media,pct_una_estrella,pct_negativas,facturacion
+1. Más de 10 días antes,70694,4.231,8.42,11.31,10037857.61
+2. Entre 5 y 10 días antes,20252,4.201,8.03,11.14,2648595.17
+3. Hasta 5 días antes,11333,4.077,9.3,12.82,1489653.68
+4. De 1 a 3 días tarde,2088,3.231,27.49,34.0,292247.94
+5. De 4 a 7 días tarde,1943,2.089,59.14,68.14,312985.75
+6. De 8 a 15 días tarde,1759,1.683,69.76,79.87,294089.54
+7. Más de 15 días tarde,1293,1.714,70.15,78.73,214544.7

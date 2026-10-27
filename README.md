@@ -59,7 +59,8 @@ La pregunta de negocio que lo guía todo tiene dos hilos:
 │   └── processed/
 │       ├── ventas_olist_limpio.csv.gz        Tabla analítica: 112.650 × 65
 │       ├── registro_limpieza.csv             Las 14 decisiones de limpieza
-│       └── modelo_estrella/                  Hechos y dimensiones para la base
+│       ├── modelo_estrella/                  Hechos y dimensiones para la base
+│       └── vistas/                           Las 6 vistas en CSV, para Power BI
 ├── notebooks/
 │   ├── 01_limpieza_y_union.ipynb
 │   └── 02_analisis_y_estadistica.ipynb
@@ -69,10 +70,13 @@ La pregunta de negocio que lo guía todo tiene dos hilos:
 ├── sql/
 │   ├── 01_esquema.sql                        Modelo en estrella
 │   ├── 02_cargar_datos.py                    Carga en PostgreSQL
-│   └── 03_vistas_analiticas.sql              6 vistas para el dashboard
+│   ├── 03_vistas_analiticas.sql              6 vistas para el dashboard
+│   └── 04_materializar_vistas.py             Las mismas 6 vistas, a CSV
 ├── powerbi/
-│   ├── GUIA_DASHBOARD.md                     Medidas DAX y guion visual
+│   ├── GUIA_DASHBOARD.md                     Carga, modelo, DAX y guion visual
+│   ├── tema_olist.json                       Tema de Power BI: paleta y estilo
 │   ├── dashboard_olist.pbix                  El informe
+│   ├── dashboard_olist.pdf                   El informe, para verlo sin Power BI
 │   └── capturas/                             Las tres páginas en imagen
 └── img/                                      Gráficos del análisis
 ```
@@ -89,7 +93,13 @@ pip install -r requisitos.txt
 
 **2. Análisis.** Ejecutar `notebooks/02_analisis_y_estadistica.ipynb`. Produce el estudio estadístico y los gráficos. Necesita que el paso anterior se haya ejecutado.
 
-**3. Base de datos.**
+**3. Vistas analíticas.** Las seis vistas que alimentan el dashboard existen por duplicado, a propósito:
+
+```bash
+python sql/04_materializar_vistas.py
+```
+
+deja los seis CSV en `data/processed/vistas/`, que es de donde los lee Power BI. Y las mismas seis, con idéntica lógica, viven como vistas de PostgreSQL:
 
 ```bash
 createdb olist
@@ -98,7 +108,9 @@ python sql/02_cargar_datos.py
 psql -d olist -f sql/03_vistas_analiticas.sql
 ```
 
-**4. Dashboard.** Seguir `powerbi/GUIA_DASHBOARD.md`, que detalla la conexión, el modelo, las medidas DAX y la configuración de cada visual.
+La versión en base de datos es la correcta conceptualmente: la lógica de negocio en un único sitio, consultable por cualquier herramienta. La versión en CSV existe por una razón práctica: permite abrir el informe sin tener que instalar y cargar un servidor, y así el proyecto se puede revisar clonando el repositorio y nada más.
+
+**4. Dashboard.** Seguir `powerbi/GUIA_DASHBOARD.md`, que detalla la carga con Power Query, las relaciones del modelo, las treinta medidas DAX y la posición exacta de cada visual de las tres páginas. El anexo de esa guía explica cómo apuntar el mismo modelo contra PostgreSQL si se prefiere esa ruta.
 
 ## Los datos
 

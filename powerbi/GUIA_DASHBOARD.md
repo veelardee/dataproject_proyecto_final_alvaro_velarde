@@ -1,63 +1,252 @@
 # Guía de construcción del dashboard en Power BI
 
-Todo lo necesario para montar el dashboard: conexión, modelo, medidas y configuración visual por visual.
+Todo lo necesario para montar `dashboard_olist.pbix` desde cero: carga de datos, modelo, medidas, tema y la posición exacta de cada visual.
+
+El dashboard se alimenta de la capa `data/processed/`, que es la salida del notebook `01_limpieza_y_union.ipynb`. No hace falta tener PostgreSQL levantado: las seis vistas analíticas de `sql/03_vistas_analiticas.sql` están materializadas en `data/processed/vistas/` con exactamente la misma lógica, de modo que el informe se puede reproducir con solo clonar el repositorio. Al final de esta guía está la alternativa para conectar contra PostgreSQL si se prefiere la ruta de base de datos.
 
 ---
 
-## 1. Conectar con PostgreSQL
+## 1. Cargar los datos con Power Query
 
-Antes de nada hay que tener la base de datos cargada: ejecutar `sql/01_esquema.sql`, después `sql/02_cargar_datos.py` y por último `sql/03_vistas_analiticas.sql`.
+Los archivos del modelo en estrella están comprimidos en `.csv.gz` para que el repositorio no se dispare de tamaño. Power BI no los abre desde **Obtener datos → Texto/CSV**, pero sí desde Power Query descomprimiéndolos al vuelo. Se hace una vez y queda resuelto.
 
-En Power BI Desktop:
+Hay además una razón de fondo para cargar así en lugar de por la interfaz: definiendo los tipos a mano con la referencia `"en-US"` se evita que un Windows en español interprete `4.033` como cuatro mil treinta y tres. Es el error silencioso más habitual al importar CSV, y aquí queda cerrado de raíz.
 
-1. **Inicio → Obtener datos → Más → Base de datos → PostgreSQL**.
-2. Servidor `localhost`, Base de datos `olist`.
-3. Modo de conectividad: **Importar** (no DirectQuery: el conjunto cabe de sobra en memoria y así el informe va mucho más rápido).
-4. Usuario `postgres` y la contraseña local.
+### 1.1 La ruta de los datos
 
-La primera vez Power BI pedirá instalar el conector **Npgsql**. Acepta; si no aparece el aviso, se descarga de la web de Npgsql y se reinicia Power BI.
+**Inicio → Transformar datos** para abrir Power Query. Dentro: **Inicio → Nuevo origen → Consulta en blanco**, y en **Ver → Editor avanzado** pega esto, cambiando la ruta por la de tu carpeta:
 
-**Qué marcar en el navegador de tablas:**
+```m
+let
+    Ruta = "C:\Users\TU_USUARIO\Documents\GitHub\dataproject_proyecto_final_alvaro_velarde\data\processed\"
+in
+    Ruta
+```
 
-| Marcar | No marcar |
+Renómbrala `RutaDatos` en el panel de la derecha. La barra final es obligatoria.
+
+Es el único sitio de todo el informe donde aparece una ruta absoluta: quien se descargue el repositorio solo tiene que cambiar esta línea para que las once consultas vuelvan a funcionar.
+
+Ahora, **clic derecho sobre `RutaDatos` → desmarcar «Habilitar carga»**. Es una consulta auxiliar, no una tabla del modelo, y si se carga aparece como una tabla fantasma con un único valor.
+
+### 1.2 La función que lee los archivos
+
+Otra **consulta en blanco**, y en el Editor avanzado:
+
+```m
+let
+    LeerCsv = (archivo as text, tipos as list) =>
+        let
+            binario   = File.Contents(RutaDatos & archivo),
+            // Los .csv.gz se descomprimen en memoria; los .csv entran tal cual
+            contenido = if Text.EndsWith(archivo, ".gz")
+                        then Binary.Decompress(binario, Compression.GZip)
+                        else binario,
+            csv       = Csv.Document(contenido, [Delimiter = ",", Encoding = 65001, QuoteStyle = QuoteStyle.Csv]),
+            cabeceras = Table.PromoteHeaders(csv, [PromoteAllScalars = true]),
+            // El "en-US" del final es lo que fija el punto como separador decimal
+            tipado    = Table.TransformColumnTypes(cabeceras, tipos, "en-US")
+        in
+            tipado
+in
+    LeerCsv
+```
+
+Renómbrala `LeerCsv`. Las funciones no se cargan al modelo, así que aquí no hay que desmarcar nada.
+
+### 1.3 Las once tablas
+
+Para cada una: **Nuevo origen → Consulta en blanco → Editor avanzado**, pegar el bloque, y renombrar la consulta con el nombre del encabezado. Son once pegadas seguidas y es la parte más mecánica de todo el proceso.
+
+#### `hechos_ventas`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\hechos_ventas.csv.gz", {
+        {"id_pedido", type text}, {"num_articulo", Int64.Type}, {"fecha_compra", type datetime},
+        {"id_cliente_unico", type text}, {"id_vendedor", type text}, {"id_producto", type text},
+        {"estado_cliente", type text}, {"estado_pedido", type text}, {"precio", type number},
+        {"flete", type number}, {"ingreso_linea", type number}, {"peso_flete_pct", type number},
+        {"dias_entrega_real", type number}, {"dias_entrega_prometidos", Int64.Type}, {"dias_retraso", type number},
+        {"llego_tarde", type number}, {"distancia_km", type number}, {"mismo_estado", type text},
+        {"nota_resena", type number}, {"resena_negativa", type number}, {"resena_1_estrella", type number},
+        {"metodo_pago", type text}, {"plazos", type number}, {"importe_pagado", type number},
+        {"hora_compra", Int64.Type}, {"franja_horaria", type text}, {"fecha", type date}
+    })
+in
+    t
+```
+
+`llego_tarde`, `resena_negativa` y `resena_1_estrella` se cargan como número y no como entero a propósito: valen 0 o 1, y así su media en DAX devuelve directamente la proporción.
+
+#### `dim_fecha`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\dim_fecha.csv.gz", {
+        {"fecha", type date}, {"anio", Int64.Type}, {"mes", Int64.Type},
+        {"nombre_mes", type text}, {"trimestre", Int64.Type}, {"dia_semana", type text},
+        {"es_fin_de_semana", type logical}, {"anio_mes", type text}
+    })
+in
+    t
+```
+
+#### `dim_cliente`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\dim_cliente.csv.gz", {
+        {"id_cliente_unico", type text}, {"ciudad_cliente", type text}, {"estado_cliente", type text},
+        {"cliente_lat", type number}, {"cliente_lng", type number}
+    })
+in
+    t
+```
+
+#### `dim_vendedor`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\dim_vendedor.csv.gz", {
+        {"id_vendedor", type text}, {"ciudad_vendedor", type text}, {"estado_vendedor", type text},
+        {"region_vendedor", type text}, {"vendedor_lat", type number}, {"vendedor_lng", type number}
+    })
+in
+    t
+```
+
+#### `dim_producto`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\dim_producto.csv.gz", {
+        {"id_producto", type text}, {"categoria", type text}, {"peso_g", type number},
+        {"largo_cm", type number}, {"alto_cm", type number}, {"ancho_cm", type number},
+        {"volumen_cm3", type number}, {"num_fotos", type number}
+    })
+in
+    t
+```
+
+#### `dim_estado`
+
+```m
+let
+    t = LeerCsv("modelo_estrella\dim_estado.csv.gz", {
+        {"estado", type text}, {"estado_nombre", type text}, {"region", type text},
+        {"poblacion", Int64.Type}, {"pib_per_capita", type number}, {"tasa_pobreza", type number},
+        {"densidad", type number}, {"idh", type number}, {"estado_lat", type number},
+        {"estado_lng", type number}
+    })
+in
+    t
+```
+
+#### `v_impacto_retraso`
+
+```m
+let
+    t = LeerCsv("vistas\v_impacto_retraso.csv", {
+        {"tramo_retraso", type text}, {"pedidos", Int64.Type}, {"nota_media", type number},
+        {"pct_una_estrella", type number}, {"pct_negativas", type number}, {"facturacion", type number}
+    })
+in
+    t
+```
+
+#### `v_rendimiento_vendedores`
+
+```m
+let
+    t = LeerCsv("vistas\v_rendimiento_vendedores.csv", {
+        {"id_vendedor", type text}, {"ciudad_vendedor", type text}, {"estado_vendedor", type text},
+        {"region_vendedor", type text}, {"vendedor_lat", type number}, {"vendedor_lng", type number},
+        {"pedidos", Int64.Type}, {"facturacion", type number}, {"nota_media", type number},
+        {"pct_entregas_tardias", type number}, {"pct_una_estrella", type number}, {"dias_entrega", type number},
+        {"semaforo", type text}, {"cuartil_facturacion", Int64.Type}
+    })
+in
+    t
+```
+
+#### `v_ventas_por_estado`
+
+```m
+let
+    t = LeerCsv("vistas\v_ventas_por_estado.csv", {
+        {"estado", type text}, {"estado_nombre", type text}, {"region", type text},
+        {"poblacion", Int64.Type}, {"pib_per_capita", type number}, {"idh", type number},
+        {"tasa_pobreza", type number}, {"estado_lat", type number}, {"estado_lng", type number},
+        {"pedidos", Int64.Type}, {"clientes", Int64.Type}, {"facturacion", type number},
+        {"gasto_por_habitante", type number}, {"clientes_por_10k_hab", type number}, {"nota_media", type number},
+        {"pct_entregas_tardias", type number}, {"dias_entrega", type number}, {"distancia_media_km", type number},
+        {"peso_flete_pct", type number}, {"puesto_facturacion", Int64.Type}, {"puesto_penetracion", Int64.Type}
+    })
+in
+    t
+```
+
+#### `v_categorias`
+
+```m
+let
+    t = LeerCsv("vistas\v_categorias.csv", {
+        {"categoria", type text}, {"lineas", Int64.Type}, {"pedidos", Int64.Type},
+        {"facturacion", type number}, {"precio_medio", type number}, {"peso_flete_pct", type number},
+        {"peso_medio_kg", type number}, {"nota_media", type number}, {"pct_entregas_tardias", type number},
+        {"cuota_facturacion_pct", type number}
+    })
+in
+    t
+```
+
+#### `v_evolucion_mensual`
+
+```m
+let
+    t = LeerCsv("vistas\v_evolucion_mensual.csv", {
+        {"anio_mes", type text}, {"primer_dia", type date}, {"pedidos", Int64.Type},
+        {"facturacion", type number}, {"nota_media", type number}, {"facturacion_media_movil_3m", type number},
+        {"variacion_mensual_pct", type number}, {"pct_entregas_tardias", type number}
+    })
+in
+    t
+```
+
+### 1.4 Cerrar y comprobar
+
+**Inicio → Cerrar y aplicar.** Tarda un par de minutos: `hechos_ventas` son 112.650 filas y `dim_cliente` 95.420.
+
+Comprueba de inmediato que la carga ha ido bien, antes de seguir. En una tabla cualquiera del lienzo, pon `hechos_ventas[ingreso_linea]` con agregación Suma: debe dar **15.843.553,24**. Si sale un número desorbitado, los decimales se han leído como miles y hay que revisar que el `"en-US"` esté en la función `LeerCsv`.
+
+---
+
+## 2. El modelo de datos
+
+En la pestaña **Modelo**, Power BI habrá detectado algunas relaciones por su cuenta. Estas cinco son las que deben existir, todas **Varios a uno** y de dirección **Simple**:
+
+| Desde | Hacia |
 |---|---|
-| `hechos_ventas` | `v_kpis_generales` |
-| `dim_cliente` | `v_impacto_retraso` |
-| `dim_vendedor` | `v_evolucion_mensual` |
-| `dim_producto` | |
-| `dim_estado` | |
-| `dim_fecha` | |
-| `v_ventas_por_estado` | |
-| `v_rendimiento_vendedores` | |
-| `v_categorias` | |
+| `hechos_ventas[fecha]` | `dim_fecha[fecha]` |
+| `hechos_ventas[id_cliente_unico]` | `dim_cliente[id_cliente_unico]` |
+| `hechos_ventas[id_vendedor]` | `dim_vendedor[id_vendedor]` |
+| `hechos_ventas[id_producto]` | `dim_producto[id_producto]` |
+| `hechos_ventas[estado_cliente]` | `dim_estado[estado]` |
 
-Las tres vistas descartadas calculan agregados que las medidas DAX ya resuelven, y tenerlas duplicaría la información en el modelo.
+Las claves están verificadas: las cinco dimensiones son únicas, sin nulos, y no hay ni una sola fila de hechos huérfana. Las relaciones entran sin avisos.
 
----
+Las cinco tablas `v_*` se quedan **sin relacionar**. Cada una alimenta sus propios visuales con su propio grano, y relacionarlas introduciría ambigüedad en el modelo.
 
-## 2. Revisar el modelo de datos
+**Marcar la tabla de calendario.** Selecciona `dim_fecha` → **Herramientas de tabla → Marcar como tabla de fechas** → columna `fecha`. Sin esto, `SAMEPERIODLASTYEAR` y `DATESYTD` no funcionan.
 
-En la pestaña **Modelo** (icono del diagrama, a la izquierda), Power BI habrá detectado algunas relaciones solo. Hay que dejarlo así:
-
-| Desde | Hacia | Cardinalidad | Dirección |
-|---|---|---|---|
-| `hechos_ventas[fecha]` | `dim_fecha[fecha]` | Varios a uno | Simple |
-| `hechos_ventas[id_cliente_unico]` | `dim_cliente[id_cliente_unico]` | Varios a uno | Simple |
-| `hechos_ventas[id_vendedor]` | `dim_vendedor[id_vendedor]` | Varios a uno | Simple |
-| `hechos_ventas[id_producto]` | `dim_producto[id_producto]` | Varios a uno | Simple |
-| `hechos_ventas[estado_cliente]` | `dim_estado[estado]` | Varios a uno | Simple |
-
-Las vistas `v_ventas_por_estado`, `v_rendimiento_vendedores` y `v_categorias` se quedan **sin relacionar**: alimentan sus propios visuales y relacionarlas crearía ambigüedad en el modelo.
-
-**Marcar la tabla de calendario.** Selecciona `dim_fecha` → **Herramientas de tabla → Marcar como tabla de fechas** → columna `fecha`. Sin esto las funciones de inteligencia de tiempo no funcionan.
-
-**Ocultar el ruido.** En la vista de modelo, clic derecho → Ocultar en la vista de informe sobre todas las columnas de identificador (`id_pedido`, `id_cliente_unico`, `id_vendedor`, `id_producto`). No aportan nada al usuario del informe y ensucian el panel de campos.
+**Ocultar el ruido.** Clic derecho → *Ocultar en la vista de informe* sobre los identificadores (`id_pedido`, `id_cliente_unico`, `id_vendedor`, `id_producto`) y sobre `dim_fecha[nombre_mes]` y `dim_fecha[dia_semana]`, que vienen en inglés del origen y no se usan en ningún visual. El panel de campos queda limpio y nadie construye nada por error sobre una columna que no toca.
 
 ---
 
 ## 3. Medidas DAX
 
-Crea una tabla vacía para agruparlas: **Inicio → Especificar datos**, nómbrala `_Medidas`, acepta con una columna vacía, y luego borra esa columna desde el editor de Power Query. Después, con la tabla seleccionada, **Nueva medida** para cada una.
+Crea una tabla para agruparlas: **Inicio → Especificar datos**, nómbrala `_Medidas`, acepta con la columna vacía y luego borra esa columna desde Power Query. Después, con `_Medidas` seleccionada, **Nueva medida** para cada bloque.
 
 ### Volumen y facturación
 
@@ -105,7 +294,7 @@ Nota media = AVERAGE(hechos_ventas[nota_resena])
 % Entregas tardías = AVERAGE(hechos_ventas[llego_tarde])
 ```
 
-`llego_tarde` vale 1 o 0, así que su media es directamente la proporción. Formatéala como porcentaje.
+`llego_tarde` vale 1 o 0, así que su media es la proporción directamente. Formatéala como porcentaje con un decimal.
 
 ```dax
 % Reseñas de 1 estrella = AVERAGE(hechos_ventas[resena_1_estrella])
@@ -196,6 +385,10 @@ Clientes por 10.000 habitantes =
 DIVIDE([Clientes], [Población alcanzada]) * 10000
 ```
 
+```dax
+Estados cubiertos = DISTINCTCOUNT(v_ventas_por_estado[estado])
+```
+
 ### Formato condicional
 
 ```dax
@@ -208,13 +401,29 @@ SWITCH(
 )
 ```
 
-Se usa en **Formato → Color de fuente → fx → Formato por → Valor del campo**, eligiendo esta medida.
+Se usa en **Formato → Color de fuente → fx → Formato por: Valor del campo**, eligiendo esta medida.
+
+### Formatos de número
+
+Con cada medida seleccionada, en **Herramientas de medición**:
+
+| Medidas | Formato |
+|---|---|
+| Facturación, Facturación producto, Facturación flete, Facturación en riesgo | Número entero, separador de miles |
+| Ticket medio, Gasto por habitante | Dos decimales |
+| Pedidos, Clientes, Vendedores activos, Vendedores críticos, Estados cubiertos | Número entero |
+| % Entregas tardías, % de 1 estrella, % negativas, Peso del flete %, Variación interanual % | Porcentaje, un decimal |
+| Nota media y derivadas, Días de entrega, Distancia media | Dos decimales |
 
 ---
 
-## 4. Paleta y estilo
+## 4. El tema
 
-Colores comprobados para que sigan distinguiéndose con daltonismo:
+**Vista → Temas → Buscar temas** y selecciona `powerbi/tema_olist.json`.
+
+Deja resueltos de una vez los colores, la tipografía, el fondo de página, la cuadrícula tenue, las esquinas redondeadas y la desaparición de bordes y sombras. Todo lo que añadas después lo hereda, así que es el primer paso antes de colocar un solo visual.
+
+La paleta está comprobada para que las series sigan distinguiéndose con daltonismo:
 
 | Uso | Color |
 |---|---|
@@ -223,87 +432,128 @@ Colores comprobados para que sigan distinguiéndose con daltonismo:
 | Positivo | `#1baf7a` |
 | Aviso | `#eda100` |
 | Crítico | `#e34948` |
-| Texto | `#0b0b0b` |
-| Texto secundario | `#52514e` |
-| Fondo de página | `#f7f7f5` |
 
-**Vista → Tema → Personalizar tema actual** para cargarlos de una vez y que todos los visuales los hereden.
+Tres reglas que el tema no puede imponer por ti:
 
-Tres reglas que marcan la diferencia:
-
-- **Sin bordes ni sombras** en los visuales: solo fondo blanco y esquinas redondeadas a 8 px.
-- **Cuadrícula tenue**, gris `#e8e7e2`, y nunca líneas verticales y horizontales a la vez.
 - **Un solo eje por gráfico.** Nada de doble eje vertical: si hay dos medidas de escalas distintas, se hacen dos gráficos.
+- **Nunca cuadrícula vertical y horizontal a la vez.** El tema ya deja solo la horizontal.
+- **Títulos que digan algo.** «Llegar tarde hunde la valoración» comunica mucho más que «Nota media por tramo de retraso». Los títulos de abajo están escritos así a propósito.
 
 ---
 
 ## 5. Las tres páginas
 
+El lienzo es el estándar **16:9, 1280 × 720**. Para cada visual, selecciónalo y escribe su posición y tamaño en **Formato → General → Propiedades → Posición**. Teclear estos cuatro números por visual es lo que separa un informe que parece diseñado de uno que parece colocado a ojo.
+
 ### Página 1 · Visión general
 
 Para dirección: cómo va el negocio.
 
-**Fila superior, cinco tarjetas** (visual *Tarjeta*): Facturación, Pedidos, Clientes, Nota media y % Entregas tardías.
+| Visual | Tipo | Campos | X | Y | An. | Al. |
+|---|---|---|---|---|---|---|
+| Título «Olist · Visión general del negocio» | Cuadro de texto | — | 24 | 16 | 600 | 36 |
+| Año | Segmentación (desplegable) | `dim_fecha[anio]` | 716 | 20 | 176 | 36 |
+| Región | Segmentación (desplegable) | `dim_estado[region]` | 900 | 20 | 176 | 36 |
+| Categoría | Segmentación (desplegable) | `dim_producto[categoria]` | 1084 | 20 | 176 | 36 |
+| Facturación | Tarjeta | `[Facturación]` | 24 | 72 | 232 | 92 |
+| Pedidos | Tarjeta | `[Pedidos]` | 274 | 72 | 232 | 92 |
+| Clientes | Tarjeta | `[Clientes]` | 524 | 72 | 232 | 92 |
+| Nota media | Tarjeta | `[Nota media]` | 774 | 72 | 232 | 92 |
+| Entregas tardías | Tarjeta | `[% Entregas tardías]` | 1024 | 72 | 232 | 92 |
+| «De 57.000 reales al mes a más de un millón en dos años» | Gráfico de áreas | Eje X `dim_fecha[anio_mes]` · Eje Y `[Facturación]` | 24 | 180 | 760 | 256 |
+| «São Paulo concentra el 37% del negocio» | Mapa | Lat. `dim_estado[estado_lat]` · Long. `dim_estado[estado_lng]` · Tamaño `[Facturación]` · Leyenda `dim_estado[region]` | 808 | 180 | 448 | 256 |
+| «Diez categorías concentran dos tercios de los ingresos» | Barras horizontales | Eje Y `v_categorias[categoria]` · Eje X `v_categorias[facturacion]` | 24 | 452 | 392 | 240 |
+| «Más de la mitad de los pedidos recibe cinco estrellas» | Columnas | Eje X `hechos_ventas[nota_resena]` · Eje Y Recuento de `id_pedido` | 444 | 452 | 392 | 240 |
+| «El sudeste acorta el plazo a la mitad» | Barras horizontales | Eje Y `dim_estado[region]` · Eje X `[Días de entrega]` | 864 | 452 | 392 | 240 |
 
-**Gráfico de áreas** — Evolución mensual
-Eje X `dim_fecha[anio_mes]`, eje Y `[Facturación]`. Activa la línea de tendencia en Analítica.
+Detalles que importan:
 
-**Mapa** — Distribución geográfica
-Visual *Mapa*. Latitud `dim_estado[estado_lat]`, Longitud `dim_estado[estado_lng]`, Tamaño de burbuja `[Facturación]`, Leyenda `dim_estado[region]`.
-
-**Gráfico de barras horizontales** — Top 10 categorías
-Eje Y `dim_producto[categoria]`, eje X `[Facturación]`. En Filtros del visual: Filtrado N superior = 10 por Facturación.
-
-**Gráfico de columnas** — Distribución de las notas
-Eje X `hechos_ventas[nota_resena]`, eje Y Recuento. Colorea de rojo las columnas 1 y 2.
-
-**Segmentaciones** en una franja a la izquierda: Año, Región, Categoría. Todas en formato desplegable para no comerse la página.
+- En el gráfico de áreas, **Analítica → Línea de tendencia** activada.
+- En las barras de categorías, **Filtros del visual → Filtrado N superior = 10** por `facturacion`.
+- En la distribución de notas, colorea de `#e34948` las columnas 1 y 2 y deja el resto en azul: la mirada va directa al problema.
+- Las tres segmentaciones en modo **Desplegable** (Formato → Configuración de segmentación → Estilo), para que no se coman la página.
 
 ### Página 2 · Calidad del servicio
 
-Para operaciones: dónde está el problema.
+Para operaciones: dónde está el problema. Es la página del hallazgo central.
 
-**Cuatro tarjetas**: % Entregas tardías, Días de entrega, Nota si llega a tiempo, Nota si llega tarde. Las dos últimas, juntas, cuentan la historia entera.
+| Visual | Tipo | Campos | X | Y | An. | Al. |
+|---|---|---|---|---|---|---|
+| Título «Calidad del servicio · el coste de llegar tarde» | Cuadro de texto | — | 24 | 16 | 700 | 36 |
+| Entregas tardías | Tarjeta | `[% Entregas tardías]` | 24 | 72 | 294 | 92 |
+| Días de entrega | Tarjeta | `[Días de entrega]` | 336 | 72 | 294 | 92 |
+| Nota si llega a tiempo | Tarjeta | `[Nota si llega a tiempo]` | 648 | 72 | 294 | 92 |
+| Nota si llega tarde | Tarjeta | `[Nota si llega tarde]` | 960 | 72 | 294 | 92 |
+| «La nota cae en escalera según crece el retraso» | Columnas | Eje X `v_impacto_retraso[tramo_retraso]` · Eje Y `v_impacto_retraso[nota_media]` | 24 | 180 | 604 | 256 |
+| «Pasada una semana, siete de cada diez dan una estrella» | Columnas | Eje X `v_impacto_retraso[tramo_retraso]` · Eje Y `v_impacto_retraso[pct_una_estrella]` | 652 | 180 | 604 | 256 |
+| «Veinte vendedores concentran el problema» | Dispersión | Eje X `pct_entregas_tardias` · Eje Y `nota_media` · Tamaño `facturacion` · Leyenda `semaforo` · Detalles `id_vendedor` | 24 | 452 | 604 | 240 |
+| Vendedores críticos | Tabla | `id_vendedor`, `estado_vendedor`, `pedidos`, `facturacion`, `pct_entregas_tardias`, `nota_media` | 652 | 452 | 604 | 240 |
 
-**Gráfico de columnas** — El gradiente del retraso
-Es el visual más importante del informe. Eje X `v_impacto_retraso[tramo_retraso]`, eje Y `v_impacto_retraso[nota_media]`. Colorea de azul los tres primeros tramos y de naranja los cuatro últimos.
+Detalles que importan:
 
-**Gráfico de columnas** — % de 1 estrella por tramo
-Mismo eje X, eje Y `pct_una_estrella`. Al lado del anterior.
-
-**Gráfico de barras** — Plazo por región
-Eje Y `dim_estado[region]`, eje X `[Días de entrega]`.
-
-**Gráfico de dispersión** — Vendedores
-Eje X `v_rendimiento_vendedores[pct_entregas_tardias]`, eje Y `nota_media`, Tamaño `facturacion`, Leyenda `semaforo`. Este visual identifica de un vistazo a los veinte vendedores problemáticos.
-
-**Tabla** — Vendedores críticos
-Columnas: vendedor, estado, pedidos, facturación, % tardías, nota. Filtro del visual: `semaforo` es "Crítico". Aplica el formato condicional del semáforo sobre la columna de porcentaje.
+- Las dos tarjetas de nota, **una al lado de la otra, cuentan la historia entera**: 4,21 frente a 2,26. No hace falta ningún texto explicativo.
+- En los dos gráficos de tramos, colorea de azul los tres primeros tramos (entregas adelantadas) y de naranja `#eb6834` los cuatro últimos (entregas tardías). El salto de color cae justo donde cae el escalón de la nota.
+- En la dispersión, fija los colores de la leyenda: Correcto `#1baf7a`, Vigilar `#eda100`, Crítico `#e34948`.
+- En la tabla, **Filtros del visual → `semaforo` es «Crítico»**, y ordénala por `facturacion` descendente. Aplica el formato condicional del semáforo sobre la columna de porcentaje.
 
 ### Página 3 · Oportunidad comercial
 
 Para el equipo comercial: dónde crecer.
 
-**Tres tarjetas**: Gasto por habitante, Clientes por 10.000 habitantes, Estados cubiertos.
+| Visual | Tipo | Campos | X | Y | An. | Al. |
+|---|---|---|---|---|---|---|
+| Título «Oportunidad comercial · dónde queda recorrido» | Cuadro de texto | — | 24 | 16 | 700 | 36 |
+| Gasto por habitante | Tarjeta | `[Gasto por habitante]` | 24 | 72 | 398 | 92 |
+| Clientes por 10.000 hab. | Tarjeta | `[Clientes por 10.000 habitantes]` | 440 | 72 | 398 | 92 |
+| Estados cubiertos | Tarjeta | `[Estados cubiertos]` | 856 | 72 | 398 | 92 |
+| «El desarrollo del estado explica el gasto, pero no en todos» | Dispersión | Eje X `v_ventas_por_estado[idh]` · Eje Y `gasto_por_habitante` · Tamaño `poblacion` · Detalles `estado` | 24 | 180 | 760 | 256 |
+| «La penetración se concentra en el sudeste» | Mapa | Lat. `estado_lat` · Long. `estado_lng` · Tamaño `gasto_por_habitante` · Leyenda `region` | 808 | 180 | 448 | 256 |
+| Estados ordenados por recorrido | Tabla | `estado_nombre`, `facturacion`, `gasto_por_habitante`, `puesto_penetracion`, `pct_entregas_tardias`, `dias_entrega` | 24 | 452 | 760 | 240 |
+| «Los estados del norte esperan el triple» | Barras horizontales | Eje Y `v_ventas_por_estado[estado]` · Eje X `dias_entrega` | 808 | 452 | 448 | 240 |
 
-**Gráfico de dispersión** — Penetración frente a desarrollo
-Eje X `v_ventas_por_estado[idh]`, eje Y `gasto_por_habitante`, Tamaño `poblacion`, Detalles `estado`. En **Analítica → Línea de tendencia**, actívala: los estados por debajo de la recta son la oportunidad.
+Detalles que importan:
 
-**Mapa** — Penetración por estado
-Igual que el de la página 1 pero con Tamaño de burbuja `gasto_por_habitante` y color por `pct_entregas_tardias`. Deja ver que los estados con menos penetración son los que peor servicio reciben.
+- En la dispersión, **Analítica → Línea de tendencia** activada: los estados por debajo de la recta son exactamente la oportunidad comercial, y se ven de un golpe de vista.
+- En la tabla, ordena por `puesto_penetracion` ascendente.
+- En las barras de días de entrega, ordena de mayor a menor y deja solo los diez primeros con **Filtrado N superior**.
+- Esta página y la anterior se cierran entre sí, y conviene decirlo en la conclusión: la correlación entre el gasto por habitante de un estado y su plazo de entrega es de **−0,84**. Roraima y Amapá esperan 27,8 días frente a los 8,3 de São Paulo, y son justo los estados donde menos se vende. El plazo no es solo un problema de atención al cliente: es la barrera de entrada a los mercados que quedan por abrir.
 
-**Tabla** — Estados ordenados por recorrido
-Columnas: estado, facturación, gasto por habitante, puesto de penetración, % tardías, días de entrega.
+### Navegación
 
-**Gráfico de barras** — Días de entrega por estado
-Ordenado de mayor a menor. Los seis primeros son los estados con más potencial sin captar.
+**Insertar → Botones → Navegador de páginas** en la página 1, y cópialo con Ctrl+C / Ctrl+V en las otras dos para que quede en la misma posición. Colócalo en X 24, Y 700 si lo quieres como pie, o déjalo arriba a la derecha.
 
 ---
 
 ## 6. Antes de dar por cerrado el informe
 
-- **Comprueba los totales**: la facturación debe dar 15.843.553 R$ y los pedidos 98.666. Si no cuadra, algo falla en las relaciones del modelo.
-- **Prueba los filtros**: selecciona un año y comprueba que las tres páginas responden.
-- **Añade botones de navegación** entre páginas: Insertar → Botones → Navegador de páginas.
-- **Títulos que digan algo.** "Llegar tarde hunde la valoración" comunica mucho más que "Nota media por tramo de retraso".
-- **Exporta a PDF** (Archivo → Exportar → PDF) y guarda capturas de cada página en `powerbi/capturas/` para el README.
+**Cuadra los totales.** Con todos los filtros limpios, la página 1 debe mostrar:
+
+| Indicador | Valor |
+|---|---|
+| Facturación | 15.843.553 R$ |
+| Pedidos | 98.666 |
+| Clientes | 95.420 |
+| Nota media | 4,03 |
+| Entregas tardías | 6,6 % |
+
+Si alguno no cuadra, el problema está en una relación del modelo o en un filtro que se ha quedado puesto, no en los datos.
+
+**Prueba los filtros.** Selecciona un año en la página 1 y comprueba que las tarjetas y los tres gráficos responden. Las páginas 2 y 3 se alimentan de las vistas, que no están relacionadas con el calendario, así que no deben moverse: es el comportamiento esperado.
+
+**Guarda el archivo** como `powerbi/dashboard_olist.pbix`, dentro del repositorio.
+
+**Captura las tres páginas.** Con cada página abierta, Win+Mayús+S para recortar el lienzo completo, y guarda en `powerbi/capturas/` como `pagina_1_vision_general.png`, `pagina_2_calidad_servicio.png` y `pagina_3_oportunidad_comercial.png`. Exporta además el informe entero a PDF desde **Archivo → Exportar → PDF** y guárdalo como `powerbi/dashboard_olist.pdf`: así quien no tenga Power BI instalado también puede verlo.
+
+---
+
+## Anexo · La alternativa con PostgreSQL
+
+El modelo también se puede alimentar desde la base de datos, que es de donde salen las vistas materializadas. Si se prefiere esa ruta:
+
+1. Ejecutar `sql/01_esquema.sql` para crear el modelo en estrella.
+2. Cargar los datos. `sql/02_cargar_datos.py` lo hace desde Python; también vale `\copy` desde psql, descomprimiendo antes los `.csv.gz`.
+3. Ejecutar `sql/03_vistas_analiticas.sql` para crear las seis vistas.
+4. En Power BI, **Obtener datos → Base de datos → PostgreSQL**, servidor `localhost`, base de datos `olist`, modo **Importar**. La primera vez pedirá instalar el conector **Npgsql**.
+5. Marcar las seis tablas del modelo en estrella y las vistas `v_ventas_por_estado`, `v_rendimiento_vendedores`, `v_categorias`, `v_impacto_retraso` y `v_evolucion_mensual`.
+
+Los nombres de tabla, columna y las medidas DAX son idénticos, así que el resto de la guía se sigue igual sin cambiar una sola línea. La ruta de Power Query es la que está documentada como principal por un motivo práctico: no obliga a tener el servidor levantado para abrir el informe.
